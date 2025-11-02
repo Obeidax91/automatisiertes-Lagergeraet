@@ -11,7 +11,7 @@ DEFAULT_BAUD = 250000
 
 #################################################################################################################################
 ############## WICHTIG: Diese Version ist nur mit XAxisRamp2DUE kompatibel!                                   ###################
-############## Mit diesem Code wird der Artikel eingegeben --> wird gehomt --> dann wird PICK_X <mm> gesendet ###################
+############## Mit diesem Code wird den Artikel eingegeben --> wird gehomt --> dann wird PICK_X <mm> gesendet ###################
 ############## Arduino bewegt sich zu Position, holt den Artikel und fährt wieder zu Home Position zurück.     ###################
 ############## Wenn aber während des Abholens HOME_X gedrückt wird,                                            ###################
 ############## wird erneut gehomt und der Artikel erneut gesucht.                                             ###################
@@ -155,7 +155,7 @@ class PickerGUI:
         ttk.Button(left_box, text="Hole Artikel", command=self.pick_item).pack(side="left", padx=8)
         ttk.Button(left_box, text="🏠 HOME_X", command=self.home_x).pack(side="left")
 
-        # Füller und STOP rechts alleine
+        # STOP rechts alleine (rot)
         stop_box = ttk.Frame(search_frame)
         stop_box.pack(side="right", fill="y")
         self.stop_btn = tk.Button(
@@ -381,7 +381,6 @@ class PickerGUI:
 
                 if "pick: done" in low:
                     self.pick_in_progress = False
-                    # ggf. Homing folgt → GIF noch nicht zwingend stoppen
                     continue
 
                 if "homing: done" in low:
