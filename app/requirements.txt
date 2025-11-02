@@ -1,0 +1,4 @@
+# Python-Abhängigkeiten für Regal-Picker GUI
+pyserial>=3.5
+Pillow>=10.0.0
+tkinter; platform_system == "Windows"
