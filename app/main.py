@@ -62,7 +62,6 @@ class SerialReader(threading.Thread):
                 self.out_queue.put(f"[SERIAL ERROR] {e}")
                 break
 
-
 # ------------------- AutoComplete Combobox -------------------
 class AutoCompleteCombobox(ttk.Combobox):
     def set_completion_list(self, completion_list):
@@ -79,7 +78,6 @@ class AutoCompleteCombobox(ttk.Combobox):
         if matches:
             self.event_generate("<Down>")  # Vorschläge aufklappen
 
-
 # ------------------- Hauptklasse GUI -------------------
 class PickerGUI:
     def __init__(self, root):
@@ -93,7 +91,6 @@ class PickerGUI:
         self.reader_stop = threading.Event()
         self.rx_queue = queue.Queue()
         self.motion_active = False
-        self.pick_in_progress = False
 
         EDGE_PAD = 16
         container = ttk.Frame(root, padding=16)
@@ -103,7 +100,6 @@ class PickerGUI:
         header = ttk.Frame(container)
         header.pack(fill="x", pady=(0, 16), padx=(EDGE_PAD, EDGE_PAD))
         header.columnconfigure(0, weight=1)
-        header.columnconfigure(1, weight=0)
 
         self.anim_label = ttk.Label(header, background="#1E1E1E")
         self.anim_label.grid(row=0, column=0, sticky="nw", padx=(0, 8), rowspan=2)
@@ -112,23 +108,13 @@ class PickerGUI:
         if self.anim_frames:
             self.anim_label.configure(image=self.anim_frames[0])
 
-        self.title_label = ttk.Label(
+        ttk.Label(
             header,
             text="Regal-Picker – Artikel-Suchsystem",
             font=("Segoe UI", 15, "bold"),
             foreground="#E9F3EE",
             background="#1E1E1E",
-        )
-        self.title_label.grid(row=1, column=0, sticky="sw", pady=(2, 0))
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        logo_path = os.path.join(script_dir, "assets", "logo.png")
-        if os.path.exists(logo_path):
-            img = Image.open(logo_path).resize((150, 70), Image.LANCZOS)
-            self.logo_img = ImageTk.PhotoImage(img)
-            ttk.Label(header, image=self.logo_img, background="#1E1E1E").grid(
-                row=0, column=1, sticky="ne", padx=(8, 16), rowspan=2
-            )
+        ).grid(row=1, column=0, sticky="sw", pady=(2, 0))
 
         # Connection
         conn_frame = ttk.Frame(container)
@@ -190,13 +176,7 @@ class PickerGUI:
         logf = ttk.LabelFrame(container, text="Serielles Log")
         logf.pack(fill="both", expand=True, pady=8, padx=(EDGE_PAD, EDGE_PAD))
         self.log = tk.Text(
-            logf,
-            height=16,
-            wrap="word",
-            bg="#121212",
-            fg="#D0D0D0",
-            insertbackground="white",
-            relief="flat",
+            logf, height=16, wrap="word", bg="#121212", fg="#D0D0D0", insertbackground="white", relief="flat"
         )
         self.log.pack(fill="both", expand=True, padx=4, pady=4)
 
@@ -236,15 +216,17 @@ class PickerGUI:
         if self.anim_running:
             self.root.after(delay, self._start_gif, next_i)
 
-    def _show_gif(self):
+    def _gif_on(self):
         if self.anim_frames and not self.anim_running:
             self.anim_running = True
             self._start_gif()
+        self.motion_state.set("Bewegt sich...")
 
-    def _hide_gif(self):
+    def _gif_off(self):
         self.anim_running = False
         if self.anim_frames:
             self.anim_label.configure(image=self.anim_frames[0])
+        self.motion_state.set("Stillstand")
 
     # Serial connection
     def refresh_ports(self):
@@ -281,32 +263,27 @@ class PickerGUI:
                 pass
             self.ser = None
         self.status.set("Getrennt")
-        self.motion_state.set("Stillstand")
-        self._append_log("[INFO] Verbindung getrennt")
-        self._hide_gif()
-        self.pick_in_progress = False
         self.motion_active = False
+        self._gif_off()
+        self._append_log("[INFO] Verbindung getrennt")
 
-    # Stop + Commands
+    # Commands
     def stop_now(self):
         self._send_line("STOP_X")
         self.motion_active = False
-        self._hide_gif()
-        self.motion_state.set("Stillstand")
+        self._gif_off()
 
     def _on_enter_search(self, event):
         self.pick_item()
 
     def pick_item(self):
-        if self.motion_active:
-            messagebox.showinfo("Hinweis", "Bewegung läuft – bitte warten.")
+        if not self._is_connected():
             return
         raw = self.search_var.get().strip()
         if not raw:
             messagebox.showinfo("Hinweis", "Bitte einen Artikelnamen eingeben.")
             return
-
-        key = raw.strip().upper()
+        key = raw.upper()
         if key in ALIASES:
             raw = ALIASES[key]
         else:
@@ -317,31 +294,39 @@ class PickerGUI:
             else:
                 messagebox.showwarning("Nicht gefunden", f"Artikel '{raw}' nicht im System!")
                 return
-
         regal = ITEM_TO_REGAL[raw]
         x_mm = REGAL_X_MM.get(regal)
         if x_mm is None:
             messagebox.showerror("Fehler", f"Keine X-Position für Regal {regal}!")
             return
-
         self._append_log(f"[INFO] '{raw}' → Regal {regal} ({x_mm} mm)")
-        self.motion_active = True
-        self._show_gif()
-        self._send_line(f"PICK_X {x_mm}")
-        self.motion_state.set("Bewegt sich...")
+        self._send_line(f"PICK_X {x_mm}")   # Start → GIF an via _send_line
 
     def home_x(self):
-        self.motion_active = True
-        self._show_gif()
-        self._send_line("HOME_X")
-        self.motion_state.set("Bewegt sich...")
+        if not self._is_connected():
+            return
+        self._send_line("HOME_X")           # Start → GIF an via _send_line
+
+    def _is_connected(self):
+        if not self.ser or not self.ser.is_open:
+            messagebox.showwarning("Hinweis", "Nicht verbunden.")
+            return False
+        return True
 
     # Serial send / receive
     def _send_line(self, line):
-        if not self.ser or not self.ser.is_open:
-            messagebox.showwarning("Hinweis", "Nicht verbunden.")
+        if not self._is_connected():
             return
         try:
+            up = line.strip().upper()
+            # Start GIF bei allen Bewegungsbefehlen
+            if up.startswith(("PICK_X", "HOME_X", "GOTO_X")):
+                self.motion_active = True
+                self._gif_on()
+            elif up.startswith("STOP_X"):
+                self.motion_active = False
+                self._gif_off()
+
             self.ser.write((line.strip() + "\n").encode("utf-8"))
             self.ser.flush()
             self._append_log(f">> {line}")
@@ -354,10 +339,24 @@ class PickerGUI:
                 line = self.rx_queue.get_nowait()
                 self._append_log(f"<< {line}")
                 low = line.lower()
-                if any(k in low for k in ("stop cmd", "stopped", "reached")):
+
+                # *** Bewegung startet? → GIF an ***
+                if ("homing: start" in low) or ("pick: start" in low) or ("goto_x ->" in low):
+                    self.motion_active = True
+                    self._gif_on()
+                    continue
+
+                # *** Bewegung beendet? → GIF sofort aus ***
+                if (
+                    "reached" in low
+                    or "stopped" in low
+                    or "stop cmd" in low
+                    or "homing: done" in low
+                    or "pick: done" in low
+                ):
                     self.motion_active = False
-                    self._hide_gif()
-                    self.motion_state.set("Stillstand")
+                    self._gif_off()
+                    continue
         except queue.Empty:
             pass
         self.root.after(80, self._process_rx)
@@ -365,7 +364,6 @@ class PickerGUI:
     def _append_log(self, text):
         self.log.insert("end", text + "\n")
         self.log.see("end")
-
 
 if __name__ == "__main__":
     root = tk.Tk()
