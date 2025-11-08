@@ -1,0 +1,1 @@
+main.py was not updated in Release 1.3.0 and with v1.3.1 is correctly updates and the Issu with GIF sync. was totaly solved
