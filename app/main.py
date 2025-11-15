@@ -83,6 +83,7 @@ class PickerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Regal-Picker – Artikel-Suchsystem")
+        self.root.iconbitmap(default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon_home.png")) # Pfad zum Icon muss beobachtet werden auf evtl. Fehler
         self.root.geometry("780x560")
         self._apply_dark_theme()
 
@@ -115,6 +116,19 @@ class PickerGUI:
             foreground="#E9F3EE",
             background="#1E1E1E",
         ).grid(row=1, column=0, sticky="sw", pady=(2, 0))
+
+
+            # Load logo: watch for possible errors
+        script_dir = os.path.dirname(os.path.abspath(__file__))               # Pfad zum aktuellen Skript
+        logo_path = os.path.join(script_dir, "assets", "logo.png")            # Pfad zum Logo-Bild
+        if os.path.exists(logo_path):                                         # Prüfen, ob die Datei existiert
+            img = Image.open(logo_path).resize((150, 70), Image.LANCZOS)
+            self.logo_img = ImageTk.PhotoImage(img)
+            header.columnconfigure(1, weight=1)
+            ttk.Label(header, image=self.logo_img, background="#1E1E1E").grid(
+                row=0, column=1, sticky="e", padx=(8, 0), rowspan=2
+            )
+
 
         # Connection
         conn_frame = ttk.Frame(container)
