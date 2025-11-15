@@ -1,6 +1,7 @@
 // === X-Achsensteuerung – Arduino DUE (Native USB, 3.3V) =====================
-// Zweistufiges Homing (FAST→SLOW), Rampenfahrt ohne delay(1), STOP/HOME/PICK
-// Obeida & ChatGPT Engineering • 2025-11-09
+// Zweistufiges Homing (FAST→SLOW + Feintuning), Rampenfahrt ohne delay(1),
+// STOP/HOME/PICK-Kommandos kompatibel zur GUI
+// Obeida & ChatGPT Engineering • 2025-11-15
 // ============================================================================
 
 #include <Arduino.h>
@@ -9,10 +10,10 @@
 // ---------------- PINs -------------------------------------------------------
 const int PIN_DIR     = 2;
 const int PIN_STEP    = 3;
-const int PIN_ENDSTOP = 8;   // aktiv LOW
+const int PIN_ENDSTOP = 8;   // aktiv LOW (Schalter nach GND)
 
 // ---------------- Mechanik / Kalibrierung -----------------------------------
-const float STEPS_PER_MM = 35.122f;   // <-- DEIN kalibrierter Wert!
+const float STEPS_PER_MM = 35.122f;   // <-- DEIN kalibrierter Wert
 
 // ---------------- Bewegungs-Parameter ---------------------------------------
 const float DEFAULT_MM_PER_S  = 200.0f;   // [mm/s]
@@ -20,14 +21,14 @@ const float DEFAULT_ACC_MM_S2 = 2000.0f;  // [mm/s²]
 const float RAMP_FACTOR       = 4.0f;     // 1.0 sanft … 6.0 aggressiv
 
 // ---------------- Homing-Parameter ------------------------------------------
-const int   HOME_DIR_SIGN     = -1;      // -1 Richtung "minus" zum Schalter
-const float HOME_PULLBACK_MM  = 2.0f;    // vom Schalter weg
+const int   HOME_DIR_SIGN     = -1;      // -1 Richtung "minus" zum Schalter, +1 Richtung "plus"
+const float HOME_PULLBACK_MM  = 2.0f;    // nach exakter Referenz vom Schalter weg
 const unsigned long HOME_TIMEOUT_MS = 0; // 0 = kein Timeout
 
-// Zweistufiges Homing (dein Wunsch)
+// Zweistufiges Homing
 const float FAST_HOME_MM_S = 200.0f;   // schnelle Annäherung
-const float SLOW_HOME_MM_S = 10.0f;   // präzise Phase
-const float SLOW_ZONE_MM   = 40.0f;   // ab hier auf "slow" wechseln (4 cm)
+const float SLOW_HOME_MM_S = 10.0f;    // präzise Phase
+const float SLOW_ZONE_MM   = 40.0f;    // ab hier auf "slow" wechseln (~4 cm)
 
 // Industrietaugliche Pulsbreiten
 const unsigned int PULSE_HIGH_US = 5;
@@ -48,9 +49,9 @@ unsigned long lastUpdateMicros = 0;
 String rxBuf;
 
 // STOP / HOME Requests
-volatile bool stop_requested = false;
-volatile bool force_home_request = false;
-bool require_home_after_next_action = false;
+volatile bool stop_requested        = false;
+volatile bool force_home_request    = false;
+bool          require_home_after_next_action = false;
 
 // ---------------- Helper -----------------------------------------------------
 static inline float absf(float x){ return x >= 0 ? x : -x; }
@@ -128,7 +129,7 @@ void setup() {
   lastUpdateMicros = now;
 }
 
-// ---------------- HOMING (zweistufig) ---------------------------------------
+// ---------------- HOMING (zweistufig + Feintuning) --------------------------
 bool doHomingSequenceBlocking(bool two_stage = true) {
   stop_requested     = false;
   force_home_request = false;
@@ -141,42 +142,111 @@ bool doHomingSequenceBlocking(bool two_stage = true) {
 
   unsigned long t_start = millis();
 
-  // Hauptphase: auf den Schalter zu (FAST→SLOW nahe Home)
+  // ========== PHASE 1: Annäherung an den Schalter (FAST → SLOW) ==========
   while (!endstopHit()) {
     pollSerialQuickForStopOrHome();
-    if (stop_requested) { stopMotionImmediate(); SerialUSB.println(F("HOMING: ABORTED BY STOP")); return false; }
+    if (stop_requested) {
+      stopMotionImmediate();
+      SerialUSB.println(F("HOMING: ABORTED BY STOP"));
+      return false;
+    }
     if (HOME_TIMEOUT_MS > 0 && (millis() - t_start) > HOME_TIMEOUT_MS) {
-      SerialUSB.println(F("HOMING: TIMEOUT (kein Endschalter)")); return false;
+      SerialUSB.println(F("HOMING: TIMEOUT (kein Endschalter)"));
+      return false;
     }
 
-    // Geschwindigkeit wählen
     float mm_s = SLOW_HOME_MM_S;
     if (two_stage) {
-      float mm_to_home = fabsf(stepsToMM(current_steps)); // 0 ist Home
+      // Abstand zur Home-Position (0 ist Home, wir sind irgendwo davor)
+      float mm_to_home = fabsf(stepsToMM(current_steps));
       mm_s = (mm_to_home <= SLOW_ZONE_MM) ? SLOW_HOME_MM_S : FAST_HOME_MM_S;
     }
+
     float sps = mm_s * STEPS_PER_MM;
     if (sps < 1.0f) sps = 1.0f;
     unsigned long period_us = (unsigned long)(1000000.0f / sps);
     if (period_us < 1) period_us = 1;
 
-    // Step
     stepPulseOnce(dir_to_switch_high);
 
-    // Rest der Periode warten
     unsigned long used = PULSE_HIGH_US + PULSE_LOW_US;
     if (period_us > used) delayMicroseconds(period_us - used);
   }
 
-  SerialUSB.println(F("HOMING: TRIGGERED"));
+  SerialUSB.println(F("HOMING: TRIGGERED (FAST PHASE)"));
 
-  // Null setzen
+  // ========== PHASE 2: Rückzug, bis Schalter sicher frei ist ==========
+  bool dir_away_high = !dir_to_switch_high; // Gegenrichtung
+  digitalWrite(PIN_DIR, dir_away_high ? HIGH : LOW);
+  last_dir_high = dir_away_high;
+
+  long max_backoff_steps = mmToSteps(HOME_PULLBACK_MM * 2.0f); // z. B. 4 mm
+  float back_mm_s = SLOW_HOME_MM_S;
+  float back_sps  = back_mm_s * STEPS_PER_MM;
+  if (back_sps < 1.0f) back_sps = 1.0f;
+  unsigned long back_period_us = (unsigned long)(1000000.0f / back_sps);
+  if (back_period_us < 1) back_period_us = 1;
+
+  long back_count = 0;
+  while (endstopHit() && back_count < max_backoff_steps) {
+    pollSerialQuickForStopOrHome();
+    if (stop_requested) {
+      stopMotionImmediate();
+      SerialUSB.println(F("HOMING: ABORTED BY STOP (BACKOFF)"));
+      return false;
+    }
+    stepPulseOnce(dir_away_high);
+    back_count++;
+
+    unsigned long used = PULSE_HIGH_US + PULSE_LOW_US;
+    if (back_period_us > used) delayMicroseconds(back_period_us - used);
+  }
+
+  if (endstopHit()) {
+    SerialUSB.println(F("HOMING: SWITCH STUCK (BACKOFF FAILED)"));
+    return false;
+  }
+
+  // ========== PHASE 3: Langsam wieder auf Schalter → EXAKTPUNKT ==========
+  bool dir_refine_high = dir_to_switch_high;
+  digitalWrite(PIN_DIR, dir_refine_high ? HIGH : LOW);
+  last_dir_high = dir_refine_high;
+
+  float refine_mm_s = SLOW_HOME_MM_S;           // sehr langsam
+  float refine_sps  = refine_mm_s * STEPS_PER_MM;
+  if (refine_sps < 1.0f) refine_sps = 1.0f;
+  unsigned long refine_period_us = (unsigned long)(1000000.0f / refine_sps);
+  if (refine_period_us < 1) refine_period_us = 1;
+
+  long refine_steps_max = mmToSteps(SLOW_ZONE_MM);  // Sicherheitslimit
+
+  long refine_count = 0;
+  while (!endstopHit() && refine_count < refine_steps_max) {
+    pollSerialQuickForStopOrHome();
+    if (stop_requested) {
+      stopMotionImmediate();
+      SerialUSB.println(F("HOMING: ABORTED BY STOP (REFINE)"));
+      return false;
+    }
+    stepPulseOnce(dir_refine_high);
+    refine_count++;
+
+    unsigned long used = PULSE_HIGH_US + PULSE_LOW_US;
+    if (refine_period_us > used) delayMicroseconds(refine_period_us - used);
+  }
+
+  if (!endstopHit()) {
+    SerialUSB.println(F("HOMING: REFINE FAILED (no switch)"));
+    return false;
+  }
+
+  // Hier: EXAKTER Referenzpunkt (Schalter gerade ausgelöst)
   current_steps = 0;
   target_steps  = 0;
   current_sps   = 0.0f;
 
-  // Pullback (langsam) in Gegenrichtung
-  bool dir_pullback_high = (HOME_DIR_SIGN < 0);
+  // ========== PHASE 4: Pullback in sichere Position (Home-Offset) ==========
+  bool dir_pullback_high = !dir_refine_high;   // vom Schalter weg
   digitalWrite(PIN_DIR, dir_pullback_high ? HIGH : LOW);
   last_dir_high = dir_pullback_high;
 
@@ -188,8 +258,13 @@ bool doHomingSequenceBlocking(bool two_stage = true) {
 
   for (long i = 0; i < pullback_steps; i++) {
     pollSerialQuickForStopOrHome();
-    if (stop_requested) { stopMotionImmediate(); SerialUSB.println(F("HOMING: ABORTED BY STOP")); return false; }
+    if (stop_requested) {
+      stopMotionImmediate();
+      SerialUSB.println(F("HOMING: ABORTED BY STOP (PULLBACK)"));
+      return false;
+    }
     stepPulseOnce(dir_pullback_high);
+
     unsigned long used = PULSE_HIGH_US + PULSE_LOW_US;
     if (pb_period_us > used) delayMicroseconds(pb_period_us - used);
   }
@@ -216,7 +291,11 @@ bool driveToPositionBlocking(long goal_steps) {
     pollSerialQuickForStopOrHome();
     if (stop_requested) {
       stopMotionImmediate();
-      if (force_home_request) { doHomingSequenceBlocking(true); SerialUSB.println(F("REACHED")); force_home_request = false; }
+      if (force_home_request) {
+        doHomingSequenceBlocking(true);
+        SerialUSB.println(F("REACHED"));
+        force_home_request = false;
+      }
       return false;
     }
 
@@ -227,7 +306,10 @@ bool driveToPositionBlocking(long goal_steps) {
 
     long delta = goal_steps - current_steps;
     if (delta == 0) {
-      if (current_sps != 0.0f) { current_sps = 0.0f; SerialUSB.println(F("REACHED")); }
+      if (current_sps != 0.0f) {
+        current_sps = 0.0f;
+        SerialUSB.println(F("REACHED"));
+      }
       break;
     }
 
@@ -254,7 +336,6 @@ bool driveToPositionBlocking(long goal_steps) {
     if (v_mag < 1.0f) v_mag = 1.0f;
     current_sps = dir_h ? +v_mag : -v_mag;
 
-    // period_us = 1e6 / |current_sps|
     float cps = absf(current_sps);
     if (cps < 1.0f) cps = 1.0f;
     unsigned long period_us = (unsigned long)(1000000.0f / cps);
@@ -276,14 +357,36 @@ void runPickSequence(float mm_target) {
   long tgt_steps = mmToSteps(mm_target);
 
   if (require_home_after_next_action) {
-    if (!driveToPositionBlocking(tgt_steps)) { SerialUSB.println(F("PICK: ABORT (MOVE)")); SerialUSB.println(F("REACHED")); return; }
-    if (!doHomingSequenceBlocking(true))     { SerialUSB.println(F("PICK: WARN (HOME FAIL)")); SerialUSB.println(F("REACHED")); return; }
-    SerialUSB.println(F("PICK: DONE")); SerialUSB.println(F("REACHED")); return;
+    if (!driveToPositionBlocking(tgt_steps)) {
+      SerialUSB.println(F("PICK: ABORT (MOVE)"));
+      SerialUSB.println(F("REACHED"));
+      return;
+    }
+    if (!doHomingSequenceBlocking(true)) {
+      SerialUSB.println(F("PICK: WARN (HOME FAIL)"));
+      SerialUSB.println(F("REACHED"));
+      return;
+    }
+    SerialUSB.println(F("PICK: DONE"));
+    SerialUSB.println(F("REACHED"));
+    return;
   }
 
-  if (!doHomingSequenceBlocking(true))       { SerialUSB.println(F("PICK: ABORT (HOME)")); SerialUSB.println(F("REACHED")); return; }
-  if (!driveToPositionBlocking(tgt_steps))   { SerialUSB.println(F("PICK: ABORT (MOVE)")); SerialUSB.println(F("REACHED")); return; }
-  if (!doHomingSequenceBlocking(true))       { SerialUSB.println(F("PICK: WARN (BACK HOME)")); SerialUSB.println(F("REACHED")); return; }
+  if (!doHomingSequenceBlocking(true)) {
+    SerialUSB.println(F("PICK: ABORT (HOME)"));
+    SerialUSB.println(F("REACHED"));
+    return;
+  }
+  if (!driveToPositionBlocking(tgt_steps)) {
+    SerialUSB.println(F("PICK: ABORT (MOVE)"));
+    SerialUSB.println(F("REACHED"));
+    return;
+  }
+  if (!doHomingSequenceBlocking(true)) {
+    SerialUSB.println(F("PICK: WARN (BACK HOME)"));
+    SerialUSB.println(F("REACHED"));
+    return;
+  }
 
   SerialUSB.println(F("PICK: DONE"));
   SerialUSB.println(F("REACHED"));
@@ -305,25 +408,43 @@ void loop() {
           SerialUSB.println(F("STOP CMD"));
 
         } else if (line.equalsIgnoreCase("HOME_X")) {
-          doHomingSequenceBlocking(true);   // zweistufiges Homing
+          doHomingSequenceBlocking(true);   // zweistufiges Homing + Feintuning
           SerialUSB.println(F("REACHED"));
 
         } else if (line.startsWith("PICK_X")) {
           int idx = line.indexOf(' ');
           float mm = NAN;
-          if (idx >= 0) { String tail = line.substring(idx + 1); tail.trim(); mm = tail.toFloat(); }
-          if (!isnan(mm)) runPickSequence(mm);
-          else { SerialUSB.println(F("PICK_X: Zahl fehlt")); SerialUSB.println(F("REACHED")); }
+          if (idx >= 0) {
+            String tail = line.substring(idx + 1);
+            tail.trim();
+            mm = tail.toFloat();
+          }
+          if (!isnan(mm)) {
+            runPickSequence(mm);
+          } else {
+            SerialUSB.println(F("PICK_X: Zahl fehlt"));
+            SerialUSB.println(F("REACHED"));
+          }
 
         } else if (line.startsWith("GOTO_X")) {
           int idx = line.indexOf(' ');
           float mm = NAN;
-          if (idx >= 0) { String tail = line.substring(idx + 1); tail.trim(); mm = tail.toFloat(); }
-          if (!isnan(mm)) { driveToPositionBlocking(mmToSteps(mm)); SerialUSB.println(F("REACHED")); }
-          else { SerialUSB.println(F("GOTO_X: Zahl fehlt")); SerialUSB.println(F("REACHED")); }
+          if (idx >= 0) {
+            String tail = line.substring(idx + 1);
+            tail.trim();
+            mm = tail.toFloat();
+          }
+          if (!isnan(mm)) {
+            driveToPositionBlocking(mmToSteps(mm));
+            SerialUSB.println(F("REACHED"));
+          } else {
+            SerialUSB.println(F("GOTO_X: Zahl fehlt"));
+            SerialUSB.println(F("REACHED"));
+          }
 
         } else {
-          SerialUSB.print(F("Unbekannter Befehl: ")); SerialUSB.println(line);
+          SerialUSB.print(F("Unbekannter Befehl: "));
+          SerialUSB.println(line);
         }
       } else {
         rxBuf = "";
@@ -334,5 +455,5 @@ void loop() {
     }
   }
 
-  // (Kein Hintergrundfahren nötig; Fahrfunktionen sind blockierend)
+  // Keine Hintergrund-Rampen nötig – alle Fahrten sind blockierend in den Funktionen oben.
 }
