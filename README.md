@@ -93,8 +93,8 @@ PICKER/
 
 | GUI | Beschreibung |
 |-----|---------------|
-| ![GUI Übersicht](../assets/gui_screenshot.png) | Hauptfenster der Regal-Picker-Oberfläche mit Dark Theme |
-| ![Artikel holen](../assets/gui_pick.gif) | Beispiel: Artikel "M8x20" wird automatisch angefahren |
+| ![GUI Übersicht](app/assets/gui_screenshot.png) | Hauptfenster der Regal-Picker-Oberfläche mit Dark Theme |
+| ![Artikel holen](app/assets/gui_pick.gif) | Beispiel: Artikel "M8x20" wird automatisch angefahren |
 
 > Screenshots oder GIFs kannst du in `/app/assets/` ablegen.
 > Beispielnamen: `gui_screenshot.png`, `gui_pick.gif`

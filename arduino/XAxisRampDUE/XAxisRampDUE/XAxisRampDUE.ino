@@ -1,19 +1,28 @@
-// === X-Achsensteuerung – Arduino DUE (Native USB, 3.3V) =====================
+// === X-Achsensteuerung – Arduino DUE + RADDS v1.6 ==========================
 // Zweistufiges Homing (FAST→SLOW + Feintuning), Rampenfahrt ohne delay(1),
 // STOP/HOME/PICK-Kommandos kompatibel zur GUI
-// Obeida & ChatGPT Engineering • 2025-11-15
+// Mit Enable-Pin (Motor wird nach Bewegungen abgeschaltet)
+// Obeida & ChatGPT Engineering • v1.3.3-RADDS
 // ============================================================================
 
 #include <Arduino.h>
 #include <math.h>
 
-// ---------------- PINs -------------------------------------------------------
-const int PIN_DIR     = 2;
-const int PIN_STEP    = 3;
-const int PIN_ENDSTOP = 8;   // aktiv LOW (Schalter nach GND)
+// ---------------- PINs (RADDS/Arduino Due) ----------------------------------
+// laut RADDS-Pinbelegung:
+//  X_DIR  -> D23
+//  X_STEP -> D24
+//  X_EN   -> D26 (aktiv LOW)
+//  X_MIN  -> D30  (Endschalter)
+const int PIN_DIR     = 23;    // X_DIR
+const int PIN_STEP    = 24;    // X_STEP
+const int PIN_X_EN    = 26;    // X_ENABLE (LOW = an, HIGH = aus)
+const int PIN_ENDSTOP = 28;    // X_MIN, aktiv LOW (Schalter nach GND)
 
 // ---------------- Mechanik / Kalibrierung -----------------------------------
-const float STEPS_PER_MM = 35.122f;   // <-- DEIN kalibrierter Wert
+// Achtung: STEPS_PER_MM hängt von Microstepping ab (hier 1/16!) und Mechanik.
+// Wert ggf. neu kalibrieren!
+const float STEPS_PER_MM = 35.122f;   // dein kalibrierter Wert (ggf. anpassen)
 
 // ---------------- Bewegungs-Parameter ---------------------------------------
 const float DEFAULT_MM_PER_S  = 200.0f;   // [mm/s]
@@ -34,7 +43,7 @@ const float SLOW_ZONE_MM   = 40.0f;    // ab hier auf "slow" wechseln (~4 cm)
 const unsigned int PULSE_HIGH_US = 5;
 const unsigned int PULSE_LOW_US  = 5;
 
-// ---------------- Laufzeit ---------------------------------------------------
+// ---------------- Laufzeit-Variablen ----------------------------------------
 float mm_per_s  = DEFAULT_MM_PER_S;
 float acc_mm_s2 = DEFAULT_ACC_MM_S2;
 
@@ -52,6 +61,15 @@ String rxBuf;
 volatile bool stop_requested        = false;
 volatile bool force_home_request    = false;
 bool          require_home_after_next_action = false;
+
+// ---------------- Enable-Helfer ---------------------------------------------
+static inline void motorEnable() {
+  digitalWrite(PIN_X_EN, LOW);   // aktiv LOW
+}
+
+static inline void motorDisable() {
+  digitalWrite(PIN_X_EN, HIGH);  // Motor stromlos
+}
 
 // ---------------- Helper -----------------------------------------------------
 static inline float absf(float x){ return x >= 0 ? x : -x; }
@@ -77,6 +95,7 @@ void stopMotionImmediate() {
   target_steps = current_steps;
   stop_requested = false;
   SerialUSB.println(F("STOPPED"));
+  motorDisable();  // Motor nach STOP stromlos
 }
 
 // Parser für STOP/HOME auch innerhalb blockierender Loops
@@ -91,6 +110,7 @@ void pollSerialQuickForStopOrHome() {
           stop_requested = true;
           require_home_after_next_action = true;
           SerialUSB.println(F("STOP CMD"));
+          motorDisable();   // Sofort stromlos
         } else if (buf.equalsIgnoreCase("HOME_X")) {
           force_home_request = true;
           stop_requested = true;
@@ -109,8 +129,10 @@ void pollSerialQuickForStopOrHome() {
 void setup() {
   pinMode(PIN_DIR, OUTPUT);
   pinMode(PIN_STEP, OUTPUT);
+  pinMode(PIN_X_EN, OUTPUT);
   digitalWrite(PIN_DIR, LOW);
   digitalWrite(PIN_STEP, LOW);
+  motorDisable();               // Start: Motor aus
 
   pinMode(PIN_ENDSTOP, INPUT_PULLUP); // aktiv LOW
 
@@ -134,6 +156,8 @@ bool doHomingSequenceBlocking(bool two_stage = true) {
   stop_requested     = false;
   force_home_request = false;
   SerialUSB.println(F("HOMING: START"));
+
+  motorEnable();  // Motor für Homing aktivieren
 
   // Richtung zum Schalter
   bool dir_to_switch_high = (HOME_DIR_SIGN > 0);
@@ -353,6 +377,7 @@ bool driveToPositionBlocking(long goal_steps) {
 // ---------------- PICK-Sequenz -----------------------------------------------
 void runPickSequence(float mm_target) {
   SerialUSB.println(F("PICK: START"));
+  motorEnable();   // Motor für gesamte PICK-Sequenz aktivieren
 
   long tgt_steps = mmToSteps(mm_target);
 
@@ -360,36 +385,43 @@ void runPickSequence(float mm_target) {
     if (!driveToPositionBlocking(tgt_steps)) {
       SerialUSB.println(F("PICK: ABORT (MOVE)"));
       SerialUSB.println(F("REACHED"));
+      motorDisable();
       return;
     }
     if (!doHomingSequenceBlocking(true)) {
       SerialUSB.println(F("PICK: WARN (HOME FAIL)"));
       SerialUSB.println(F("REACHED"));
+      motorDisable();
       return;
     }
     SerialUSB.println(F("PICK: DONE"));
     SerialUSB.println(F("REACHED"));
+    motorDisable();
     return;
   }
 
   if (!doHomingSequenceBlocking(true)) {
     SerialUSB.println(F("PICK: ABORT (HOME)"));
     SerialUSB.println(F("REACHED"));
+    motorDisable();
     return;
   }
   if (!driveToPositionBlocking(tgt_steps)) {
     SerialUSB.println(F("PICK: ABORT (MOVE)"));
     SerialUSB.println(F("REACHED"));
+    motorDisable();
     return;
   }
   if (!doHomingSequenceBlocking(true)) {
     SerialUSB.println(F("PICK: WARN (BACK HOME)"));
     SerialUSB.println(F("REACHED"));
+    motorDisable();
     return;
   }
 
   SerialUSB.println(F("PICK: DONE"));
   SerialUSB.println(F("REACHED"));
+  motorDisable();   // nach kompletter PICK-Sequenz Motor aus
 }
 
 // ---------------- loop() Parser ----------------------------------------------
@@ -406,9 +438,12 @@ void loop() {
           stop_requested = true;
           require_home_after_next_action = true;
           SerialUSB.println(F("STOP CMD"));
+          stopMotionImmediate();   // enthält motorDisable()
 
         } else if (line.equalsIgnoreCase("HOME_X")) {
+          motorEnable();
           doHomingSequenceBlocking(true);   // zweistufiges Homing + Feintuning
+          motorDisable();
           SerialUSB.println(F("REACHED"));
 
         } else if (line.startsWith("PICK_X")) {
@@ -435,7 +470,9 @@ void loop() {
             mm = tail.toFloat();
           }
           if (!isnan(mm)) {
+            motorEnable();
             driveToPositionBlocking(mmToSteps(mm));
+            motorDisable();
             SerialUSB.println(F("REACHED"));
           } else {
             SerialUSB.println(F("GOTO_X: Zahl fehlt"));
