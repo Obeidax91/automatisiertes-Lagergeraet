@@ -10,14 +10,16 @@ from PIL import Image, ImageTk, ImageSequence
 DEFAULT_BAUD = 250000
 
 # ------------------- Regal- und Artikeldaten -------------------
-REGAL_X_MM = {
-    1: 10.0,
-    2: 60.0,
-    3: 120.0,
-    4: 180.0,
-    5: 240.0,
-    6: 500.0,
-    7: 2000.0,
+# Fachnummer → (X_mm, Y_mm)
+# TODO: Auf deine reale Mechanik anpassen
+REGAL_POS_MM = {
+    1: (10.0,   0.0),
+    2: (60.0,   0.0),
+    3: (120.0,  0.0),
+    4: (180.0, 50.0),
+    5: (240.0, 50.0),
+    6: (400.0, 300.0),
+    7: (2000.0, 0.0),
 }
 
 ITEM_TO_REGAL = {
@@ -83,7 +85,7 @@ class PickerGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Regal-Picker – Artikel-Suchsystem")
-        self.root.iconbitmap(default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon_home.png")) # Pfad zum Icon muss beobachtet werden auf evtl. Fehler
+        self.root.iconbitmap(default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon_home.png"))
         self.root.geometry("780x560")
         self._apply_dark_theme()
 
@@ -117,18 +119,16 @@ class PickerGUI:
             background="#1E1E1E",
         ).grid(row=1, column=0, sticky="sw", pady=(2, 0))
 
-
-            # Load logo: watch for possible errors
-        script_dir = os.path.dirname(os.path.abspath(__file__))               # Pfad zum aktuellen Skript
-        logo_path = os.path.join(script_dir, "assets", "logo.png")            # Pfad zum Logo-Bild
-        if os.path.exists(logo_path):                                         # Prüfen, ob die Datei existiert
+        # Logo
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        logo_path = os.path.join(script_dir, "assets", "logo.png")
+        if os.path.exists(logo_path):
             img = Image.open(logo_path).resize((150, 70), Image.LANCZOS)
             self.logo_img = ImageTk.PhotoImage(img)
             header.columnconfigure(1, weight=1)
             ttk.Label(header, image=self.logo_img, background="#1E1E1E").grid(
                 row=0, column=1, sticky="e", padx=(8, 0), rowspan=2
             )
-
 
         # Connection
         conn_frame = ttk.Frame(container)
@@ -159,7 +159,9 @@ class PickerGUI:
 
         self.pick_btn = ttk.Button(left_box, text="Hole Artikel", command=self.pick_item)
         self.pick_btn.pack(side="left", padx=8)
-        self.home_btn = ttk.Button(left_box, text="🏠 HOME_X", command=self.home_x)
+
+        # Home-Button: jetzt klar als X+Y
+        self.home_btn = ttk.Button(left_box, text="🏠 HOME (X+Y)", command=self.home_all)
         self.home_btn.pack(side="left")
 
         stop_box = ttk.Frame(search_frame)
@@ -182,8 +184,14 @@ class PickerGUI:
         # Status + Log
         status_frame = ttk.Frame(container)
         status_frame.pack(fill="x", pady=8, padx=(EDGE_PAD, EDGE_PAD))
+
         self.status = tk.StringVar(value="Getrennt")
         ttk.Label(status_frame, textvariable=self.status).pack(side="left")
+
+        # Neue Anzeige: Zielposition
+        self.target_pos = tk.StringVar(value="Ziel: X=-- mm, Y=-- mm")
+        ttk.Label(status_frame, textvariable=self.target_pos).pack(side="left", padx=16)
+
         self.motion_state = tk.StringVar(value="Stillstand")
         ttk.Label(status_frame, textvariable=self.motion_state, foreground="#00FF88").pack(side="right")
 
@@ -283,7 +291,7 @@ class PickerGUI:
 
     # Commands
     def stop_now(self):
-        self._send_line("STOP_X")
+        self._send_line("STOP_X")  # STOP für beide Achsen
         self.motion_active = False
         self._gif_off()
 
@@ -297,6 +305,7 @@ class PickerGUI:
         if not raw:
             messagebox.showinfo("Hinweis", "Bitte einen Artikelnamen eingeben.")
             return
+
         key = raw.upper()
         if key in ALIASES:
             raw = ALIASES[key]
@@ -308,18 +317,27 @@ class PickerGUI:
             else:
                 messagebox.showwarning("Nicht gefunden", f"Artikel '{raw}' nicht im System!")
                 return
-        regal = ITEM_TO_REGAL[raw]
-        x_mm = REGAL_X_MM.get(regal)
-        if x_mm is None:
-            messagebox.showerror("Fehler", f"Keine X-Position für Regal {regal}!")
-            return
-        self._append_log(f"[INFO] '{raw}' → Regal {regal} ({x_mm} mm)")
-        self._send_line(f"PICK_X {x_mm}")   # Start → GIF an via _send_line
 
-    def home_x(self):
+        regal = ITEM_TO_REGAL[raw]
+        pos = REGAL_POS_MM.get(regal)
+        if pos is None:
+            messagebox.showerror("Fehler", f"Keine Position für Regal {regal}!")
+            return
+
+        x_mm, y_mm = pos
+        self._append_log(
+            f"[INFO] '{raw}' → Fach {regal} (X={x_mm:.2f} mm, Y={y_mm:.2f} mm)"
+        )
+        self.target_pos.set(f"Ziel: X={x_mm:.1f} mm, Y={y_mm:.1f} mm")
+
+        # WICHTIG: beide Koordinaten senden
+        self._send_line(f"PICK_X {x_mm:.3f} {y_mm:.3f}")
+
+    def home_all(self):
         if not self._is_connected():
             return
-        self._send_line("HOME_X")           # Start → GIF an via _send_line
+        self.target_pos.set("Ziel: X=0.0 mm, Y=0.0 mm")
+        self._send_line("HOME_X")  # Arduino: HOME für beide Achsen
 
     def _is_connected(self):
         if not self.ser or not self.ser.is_open:
@@ -378,6 +396,7 @@ class PickerGUI:
     def _append_log(self, text):
         self.log.insert("end", text + "\n")
         self.log.see("end")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
